@@ -49,6 +49,9 @@ export default function Home() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchData, setSearchData] = useState<any>({});
+  const [isDetailer, setIsDetailer] = useState(false);
+  const [businessData, setBusinessData] = useState<any>({ name: '', description: '', logo: null });
+  const [detailerSettings, setDetailerSettings] = useState<any>({ default_duration_minutes: 180, buffer_minutes: 30, max_appointments_per_slot: 1 });
 
   // Cart calculations
   const getSubtotal = () => cart.reduce((sum, item) => sum + item.price * item.qty, 0);
@@ -126,57 +129,59 @@ export default function Home() {
     saveCart();
   }, [cart, user]);
 
-  // Check auth state and load wishlist
-  useEffect(() => {
-    const checkUser = async () => {
-      const { data: { user }, error } = await supabase.auth.getUser();
+// Auth check - creates profile on first login after email confirmation
+useEffect(() => {
+  const createProfileIfNeeded = async (user: any) => {
+    if (!user) return;
+
+    // Check if profile already exists
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('user_id', user.id)
+      .single();
+
+    if (!existingProfile) {
+      // Create profile using metadata from signup
+      const isDetailer = user.user_metadata?.is_detailer || false;
+      const { error } = await supabase
+        .from('profiles')
+        .insert({
+          user_id: user.id,
+          email: user.email || '',
+          role: isDetailer ? 'detailer' : 'customer',
+          is_detailer: isDetailer,
+        });
+
       if (error) {
-        console.error('Error fetching user:', error);
-        setUser(null);
-        setWishlist([]);
+        console.error('Profile creation error:', error);
       } else {
-        setUser(user);
-        if (user) {
-          const { data, error } = await supabase
-            .from('wishlist')
-            .select('products(*)')
-            .eq('user_id', user.id);
-          if (error) {
-            console.error('Error fetching wishlist:', error);
-            setWishlist([]);
-          } else {
-            setWishlist(data.map((item: any) => item.products));
-          }
-        } else {
-          setWishlist([]);
-        }
+        console.log('Profile created with role:', isDetailer ? 'detailer' : 'customer');
       }
-    };
-    checkUser();
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      setUser(session?.user || null);
-      setDropdownOpen(false);
-      if (session?.user) {
-        supabase
-          .from('wishlist')
-          .select('products(*)')
-          .eq('user_id', session.user.id)
-          .then(({ data, error }) => {
-            if (error) {
-              console.error('Error fetching wishlist:', error);
-              setWishlist([]);
-            } else {
-              setWishlist(data.map((item: any) => item.products));
-            }
-          });
-      } else {
-        setWishlist([]);
-      }
-    });
-    return () => {
-      authListener.subscription.unsubscribe();
-    };
-  }, []);
+    }
+  };
+
+  const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+    setUser(session?.user ?? null);
+
+    // Create profile when user signs in (after email confirmation)
+    if (event === 'SIGNED_IN' && session?.user) {
+      createProfileIfNeeded(session.user);
+    }
+  });
+
+  // Initial check
+  supabase.auth.getUser().then(({ data: { user } }) => {
+    setUser(user ?? null);
+    if (user) {
+      createProfileIfNeeded(user);
+    }
+  });
+
+  return () => {
+    authListener.subscription.unsubscribe();
+  };
+}, []);
 
   // Cart interactions
   const addToCart = async (product: any) => {
@@ -321,26 +326,54 @@ export default function Home() {
           setPassword('');
           setConfirmPassword('');
         }
-      } else {
-        const { data, error } = await supabase.auth.signUp({ email, password });
-        if (error) {
-          if (error.code === 'user_already_exists' || error.message.includes('already registered')) {
-            alert('This email is already registered');
-          } else {
-            alert(error.message);
-          }
-        } else if (data.user) {
-          alert('Check your email to confirm!');
-          setAccountModalOpen(false);
-          setEmail('');
-          setPassword('');
-          setConfirmPassword('');
-        } else {
-          alert('Sign-up failed. Please try again.');
-        }
-      }
-    } catch (err) {
-      console.error('Unexpected auth error:', err);
+} else {
+  const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+    email,
+    password,
+    options: {
+      data: {
+        is_detailer: isDetailer,  // Save preference
+      },
+    },
+  });
+
+  if (signUpError) {
+    if (signUpError.code === 'user_already_exists' || signUpError.message.includes('already registered')) {
+      alert('This email is already registered');
+    } else {
+      alert(signUpError.message);
+    }
+    return;
+  }
+
+  if (signUpData.user) {
+    // Create profile immediately with instant role
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .insert({
+        user_id: signUpData.user.id,
+        email: email,
+        role: isDetailer ? 'detailer' : 'customer',  // Instant role
+        is_detailer: isDetailer,
+      });
+
+    if (profileError) {
+      console.error('Profile creation error:', profileError);
+      alert('Account created, but profile setup failed. Please contact support.');
+    }
+
+    alert('Check your email to confirm your account!');
+    setAccountModalOpen(false);
+    setEmail('');
+    setPassword('');
+    setConfirmPassword('');
+    setIsDetailer(false);
+  } else {
+    alert('Sign-up failed. Please try again.');
+  }
+}
+    } catch (error) {
+      console.error('Authentication error:', error);
       alert('An unexpected error occurred. Please try again.');
     }
   };
@@ -1106,6 +1139,37 @@ export default function Home() {
           color: var(--bg-2);
           margin-bottom: 6px;
         }
+        .detailer-toggle {
+          margin-top: 8px;
+          padding: 12px;
+          background: rgba(14,165,164,0.05);
+          border-radius: 10px;
+          border: 1px solid rgba(14,165,164,0.15);
+        }
+        .toggle-label {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 14px;
+          color: var(--bg-2);
+        }
+        .toggle-label input[type="checkbox"] {
+          width: 18px;
+          height: 18px;
+          accent-color: var(--accent);
+          cursor: pointer;
+        }
+        .toggle-text {
+          flex: 1;
+        }
+        .detailer-hint {
+          margin: 8px 0 0;
+          font-size: 13px;
+          color: var(--muted);
+          padding-left: 28px;
+        }
         .quick-view-modal {
           position: fixed;
           top: 0;
@@ -1850,67 +1914,65 @@ export default function Home() {
             <Link href="/for-business">For Business</Link>
             <Link href="/contact">Contact</Link>
           </nav>
-          <div className="actions">
-            <div style={{ position: 'relative' }}>
-              <button
-                className="btn-ghost"
-                id="open-account-modal"
-                onClick={() => user ? setDropdownOpen(!dropdownOpen) : setAccountModalOpen(true)}
-                aria-label={user ? 'Open profile menu' : 'Open account modal'}
-              >
-                {user ? (
-                  <svg className="profile-icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-                    <circle cx="12" cy="8" r="4" fill="currentColor" />
-                    <path d="M6 20C6 16.6863 8.68629 14 12 14C15.3137 14 18 16.6863 18 20" fill="currentColor" />
-                  </svg>
-                ) : (
-                  <>
-                    <span>Account</span>
-                    <svg className="account-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <circle cx="12" cy="8" r="4" stroke="black" strokeWidth="1.6" />
-                      <path d="M6 20C6 16.6863 8.68629 14 12 14C15.3137 14 18 16.6863 18 20" stroke="black" strokeWidth="1.6" />
-                    </svg>
-                  </>
-                )}
-              </button>
-              <AnimatePresence>
-                {user && dropdownOpen && (
-                  <motion.div
-                    className="dropdown"
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    transition={{ duration: 0.2 }}
-                  >
-                    <Link href="/dashboard">
-                      <button>Dashboard</button>
-                    </Link>
-                    <button onClick={handleSignOut}>Sign Out</button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-            <button className="btn-primary" onClick={() => handleBookService('Any')}>
-              Book Now
-            </button>
-            <button className="cart-btn" onClick={() => setCartOpen(!cartOpen)} aria-label="Open cart">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                <rect x="3" y="7" width="18" height="11" rx="1.2" stroke="black" strokeWidth="1.6" fill="none" />
-                <line x1="3" y1="7" x2="21" y2="7" stroke="black" strokeWidth="1.6" />
-                <path d="M6 7L9 3H15L18 7" stroke="black" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                <line x1="8.5" y1="7.5" x2="8.5" y2="18.5" stroke="black" strokeWidth="1.2" />
-                <line x1="11.5" y1="7.5" x2="11.5" y2="18.5" stroke="black" strokeWidth="1.2" />
-                <line x1="14.5" y1="7.5" x2="14.5" y2="18.5" stroke="black" strokeWidth="1.2" />
-              </svg>
-              <div className="cart-badge" style={{ display: getTotalItems() > 0 ? 'block' : 'none' }}>{getTotalItems()}</div>
-            </button>
-            <button className="menu-toggle" onClick={() => setMobileMenuOpen(!mobileMenuOpen)} aria-label="Toggle menu">
-              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 6H21M3 12H21M3 18H21" stroke="black" strokeWidth="2" strokeLinecap="round" />
-              </svg>
-            </button>
-          </div>
-        </div>
+<div className="actions">
+  <div style={{ position: 'relative' }}>
+    <button
+      className="btn-ghost"
+      onClick={() => user ? setDropdownOpen(!dropdownOpen) : setAccountModalOpen(true)}
+      aria-label={user ? 'Open profile menu' : 'Open account modal'}
+    >
+      {user ? (
+        <svg className="profile-icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="8" r="4" fill="currentColor" />
+          <path d="M6 20C6 16.6863 8.68629 14 12 14C15.3137 14 18 16.6863 18 20" fill="currentColor" />
+        </svg>
+      ) : (
+        <>
+          <span>Account</span>
+          <svg className="account-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="8" r="4" stroke="black" strokeWidth="1.6" />
+            <path d="M6 20C6 16.6863 8.68629 14 12 14C15.3137 14 18 16.6863 18 20" stroke="black" strokeWidth="1.6" />
+          </svg>
+        </>
+      )}
+    </button>
+    <AnimatePresence>
+      {user && dropdownOpen && (
+        <motion.div
+          className="dropdown"
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ duration: 0.2 }}
+        >
+          <Link href="/dashboard">
+            <button>Dashboard</button>
+          </Link>
+          <button onClick={handleSignOut}>Sign Out</button>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </div>
+  <button className="btn-primary" onClick={() => handleBookService('Any')}>
+    Book Now
+  </button>
+  <button className="cart-btn" onClick={() => setCartOpen(!cartOpen)} aria-label="Open cart">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect x="3" y="7" width="18" height="11" rx="1.2" stroke="black" strokeWidth="1.6" fill="none" />
+      <line x1="3" y1="7" x2="21" y2="7" stroke="black" strokeWidth="1.6" />
+      <path d="M6 7L9 3H15L18 7" stroke="black" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <line x1="8.5" y1="7.5" x2="8.5" y2="18.5" stroke="black" strokeWidth="1.2" />
+      <line x1="11.5" y1="7.5" x2="11.5" y2="18.5" stroke="black" strokeWidth="1.2" />
+      <line x1="14.5" y1="7.5" x2="14.5" y2="18.5" stroke="black" strokeWidth="1.2" />
+    </svg>
+    <div className="cart-badge" style={{ display: getTotalItems() > 0 ? 'block' : 'none' }}>{getTotalItems()}</div>
+  </button>
+  <button className="menu-toggle" onClick={() => setMobileMenuOpen(!mobileMenuOpen)} aria-label="Toggle menu">
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M3 6H21M3 12H21M3 18H21" stroke="black" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  </button>
+</div>
         <nav className={`mobile-menu ${mobileMenuOpen ? 'open' : ''}`} aria-label="Mobile menu">
           <Link href="/services">Services</Link>
           <Link href="/shop">Shop</Link>
@@ -1946,6 +2008,7 @@ export default function Home() {
             </AnimatePresence>
           </div>
         </nav>
+        </div>
       </header>
       <main className="wrap" role="main">
         <section className="hero" aria-label="Hero">
@@ -2590,6 +2653,21 @@ export default function Home() {
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     required
                   />
+                </div>
+                <div className="detailer-toggle">
+                  <label className="toggle-label">
+                    <input
+                      type="checkbox"
+                      checked={isDetailer}
+                      onChange={(e) => setIsDetailer(e.target.checked)}
+                    />
+                    <span className="toggle-text">Sign up as a Detailer</span>
+                  </label>
+                  {isDetailer && (
+                    <p className="detailer-hint">
+                      You'll be able to list your services and accept appointments.
+                    </p>
+                  )}
                 </div>
                 <button className="btn-primary" type="submit">
                   Sign Up
